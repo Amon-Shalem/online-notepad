@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>留言板</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --card: #ffffff;
+    --text: #1f1f1f;
+    --muted: #6b6b6b;
+    --border: #e2e0db;
+    --accent: #2f6f4f;
+    --accent-text: #ffffff;
+    --error: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161616;
+      --card: #202020;
+      --text: #ececec;
+      --muted: #9a9a9a;
+      --border: #333333;
+      --accent: #5fae86;
+      --accent-text: #0f1f17;
+      --error: #f2867d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    line-height: 1.6;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 20px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .hidden { display: none !important; }
+  input, textarea, button { font: inherit; color: inherit; }
+  input, textarea {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  textarea { resize: vertical; min-height: 96px; }
+  input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    padding: 9px 18px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-text);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  button.link {
+    background: none;
+    color: var(--muted);
+    padding: 0;
+    text-decoration: underline;
+  }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .row .spacer { flex: 1; }
+  .muted { color: var(--muted); font-size: 0.875rem; }
+  .error { color: var(--error); font-size: 0.875rem; min-height: 1.4em; margin: 6px 0 0; }
+  .topbar { display: flex; align-items: baseline; justify-content: space-between; }
+  #message-list { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 10px; }
+  #message-list li { white-space: pre-wrap; word-break: break-word; }
+  #message-list time { display: block; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <!-- 密碼畫面 -->
+  <section id="lock-view" class="hidden">
+    <h1>留言板</h1>
+    <form id="lock-form" class="card">
+      <label for="password-input" class="muted">請輸入密碼</label>
+      <input id="password-input" type="password" autocomplete="off" autofocus>
+      <p id="lock-error" class="error" role="alert"></p>
+      <div class="row"><span class="spacer"></span><button type="submit">進入</button></div>
+    </form>
+  </section>
+
+  <!-- 留言畫面 -->
+  <section id="board-view" class="hidden">
+    <div class="topbar">
+      <h1>留言板</h1>
+      <button id="logout-button" class="link" type="button">登出</button>
+    </div>
+    <form id="post-form" class="card">
+      <label for="content-input" class="muted">寫點什麼</label>
+      <textarea id="content-input" maxlength="2000"></textarea>
+      <p id="post-error" class="error" role="alert"></p>
+      <div class="row">
+        <span id="char-count" class="muted">0 / 2000</span>
+        <span class="spacer"></span>
+        <button id="refresh-button" class="link" type="button">重新整理</button>
+        <button id="post-button" type="submit">送出</button>
+      </div>
+    </form>
+    <p id="list-status" class="muted"></p>
+    <ul id="message-list"></ul>
+  </section>
+</main>
+
+<script>
+  "use strict";
+
+  // ===== 設定區：填入 Supabase 專案資訊 =====
+  // anon public key 本來就是設計給前端使用的公開金鑰，權限由資料表的 RLS 控制。
+  const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
+  const SUPABASE_KEY = "YOUR-ANON-PUBLIC-KEY";
+
+  // 進入密碼（寫在前端，只能擋一般路人）
+  const ACCESS_PASSWORD = "a";
+
+  // 單則留言字數上限，需與 textarea 的 maxlength 一致
+  const MAX_CONTENT_LENGTH = 2000;
+
+  // 一次最多載入的留言數
+  const MESSAGE_LIMIT = 200;
+
+  // localStorage 中記錄「已通過密碼」的鍵名
+  const UNLOCK_STORAGE_KEY = "online-notepad:unlocked";
+
+  const lockView = document.getElementById("lock-view");
+  const boardView = document.getElementById("board-view");
+  const lockForm = document.getElementById("lock-form");
+  const passwordInput = document.getElementById("password-input");
+  const lockError = document.getElementById("lock-error");
+  const postForm = document.getElementById("post-form");
+  const contentInput = document.getElementById("content-input");
+  const postButton = document.getElementById("post-button");
+  const postError = document.getElementById("post-error");
+  const charCount = document.getElementById("char-count");
+  const refreshButton = document.getElementById("refresh-button");
+  const logoutButton = document.getElementById("logout-button");
+  const listStatus = document.getElementById("list-status");
+  const messageList = document.getElementById("message-list");
+
+  /**
+   * 讀取 localStorage，在無痕模式或被封鎖時不讓頁面壞掉。
+   * @param {string} storageKey - 鍵名
+   * @returns {string|null} 儲存的值；讀取失敗時回傳 null
+   */
+  function readStorage(storageKey) {
+    try {
+      return window.localStorage.getItem(storageKey);
+    } catch (storageError) {
+      console.warn("[storage] 無法讀取 localStorage：", storageError);
+      return null;
+    }
+  }
+
+  /**
+   * 寫入或刪除 localStorage 的值。
+   * @param {string} storageKey - 鍵名
+   * @param {string|null} storageValue - 要寫入的值；傳 null 代表刪除
+   * @returns {void}
+   */
+  function writeStorage(storageKey, storageValue) {
+    try {
+      if (storageValue === null) {
+        window.localStorage.removeItem(storageKey);
+      } else {
+        window.localStorage.setItem(storageKey, storageValue);
+      }
+    } catch (storageError) {
+      console.warn("[storage] 無法寫入 localStorage，下次需要重新輸入密碼：", storageError);
+    }
+  }
+
+  /**
+   * 檢查 SUPABASE_URL 與 SUPABASE_KEY 是否已填入。
+   * @returns {boolean} 已設定回傳 true
+   */
+  function isSupabaseConfigured() {
+    return !SUPABASE_URL.includes("YOUR-PROJECT") && !SUPABASE_KEY.includes("YOUR-ANON");
+  }
+
+  /**
+   * 呼叫 Supabase REST API 的共用函式。
+   * @param {string} pathAndQuery - /rest/v1/ 之後的路徑與查詢字串
+   * @param {RequestInit} [requestOptions] - fetch 的額外選項
+   * @returns {Promise<any>} 解析後的 JSON 回應
+   * @throws {Error} 網路失敗或 HTTP 狀態非 2xx 時拋出，訊息含狀態碼與伺服器說明
+   */
+  async function callSupabase(pathAndQuery, requestOptions = {}) {
+    const requestHeaders = {
+      apikey: SUPABASE_KEY,
+      Authorization: "Bearer " + SUPABASE_KEY,
+      ...(requestOptions.headers || {}),
+    };
+    let response;
+    try {
+      response = await fetch(SUPABASE_URL + "/rest/v1/" + pathAndQuery, {
+        ...requestOptions,
+        headers: requestHeaders,
+      });
+    } catch (networkError) {
+      throw new Error("無法連線到伺服器，請檢查網路（" + networkError.message + "）");
+    }
+    if (!response.ok) {
+      // Supabase 錯誤回應通常是 JSON，含 message 欄位；解析失敗就用原始文字
+      const responseText = await response.text();
+      let serverMessage = responseText;
+      try {
+        serverMessage = JSON.parse(responseText).message || responseText;
+      } catch (parseError) {
+        console.warn("[api] 錯誤回應不是 JSON：", parseError);
+      }
+      throw new Error("伺服器回應 " + response.status + "：" + serverMessage);
+    }
+    return response.json();
+  }
+
+  /**
+   * 將 ISO 時間字串轉成本地易讀格式。
+   * @param {string} isoString - 資料庫回傳的 created_at
+   * @returns {string} 例如 2026/11/18 14:05；無法解析時回傳原字串
+   */
+  function formatTime(isoString) {
+    const parsedDate = new Date(isoString);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return isoString;
+    }
+    return parsedDate.toLocaleString("zh-TW", {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  }
+
+  /**
+   * 把留言陣列畫到畫面上。使用 textContent 而非 innerHTML，避免留言內容被當成 HTML 執行（XSS）。
+   * @param {Array<{id:number, content:string, created_at:string}>} messages - 由新到舊排序的留言
+   * @returns {void}
+   */
+  function renderMessages(messages) {
+    messageList.replaceChildren();
+    for (const message of messages) {
+      const listItem = document.createElement("li");
+      listItem.className = "card";
+      listItem.textContent = message.content;
+      const timeElement = document.createElement("time");
+      timeElement.className = "muted";
+      timeElement.dateTime = message.created_at;
+      timeElement.textContent = formatTime(message.created_at);
+      listItem.appendChild(timeElement);
+      messageList.appendChild(listItem);
+    }
+    listStatus.textContent = messages.length === 0 ? "還沒有留言，來寫第一則吧。" : "";
+  }
+
+  /**
+   * 從 Supabase 載入最新留言並顯示。
+   * @returns {Promise<void>}
+   */
+  async function loadMessages() {
+    if (!isSupabaseConfigured()) {
+      listStatus.textContent = "尚未設定 Supabase：請在 index.html 中填入 SUPABASE_URL 與 SUPABASE_KEY。";
+      return;
+    }
+    listStatus.textContent = "載入中…";
+    refreshButton.disabled = true;
+    try {
+      const messages = await callSupabase(
+        "messages?select=id,content,created_at&order=created_at.desc&limit=" + MESSAGE_LIMIT
+      );
+      renderMessages(messages);
+      console.info("[board] 已載入 " + messages.length + " 則留言");
+    } catch (loadError) {
+      console.error("[board] 載入留言失敗：", loadError);
+      listStatus.textContent = "載入失敗：" + loadError.message;
+    } finally {
+      refreshButton.disabled = false;
+    }
+  }
+
+  /**
+   * 驗證留言內容。
+   * @param {string} rawContent - 使用者輸入的原始文字
+   * @returns {{ok:true, content:string} | {ok:false, reason:string}} 驗證結果與修剪後的內容
+   */
+  function validateContent(rawContent) {
+    const trimmedContent = rawContent.trim();
+    if (trimmedContent.length === 0) {
+      return { ok: false, reason: "留言不能是空的。" };
+    }
+    if (trimmedContent.length > MAX_CONTENT_LENGTH) {
+      return { ok: false, reason: "留言最多 " + MAX_CONTENT_LENGTH + " 字。" };
+    }
+    return { ok: true, content: trimmedContent };
+  }
+
+  /**
+   * 處理送出留言：驗證、寫入資料庫、清空輸入框並重新載入列表。
+   * @param {SubmitEvent} submitEvent - 表單送出事件
+   * @returns {Promise<void>}
+   */
+  async function handlePostSubmit(submitEvent) {
+    submitEvent.preventDefault();
+    postError.textContent = "";
+    if (!isSupabaseConfigured()) {
+      postError.textContent = "尚未設定 Supabase，無法送出。";
+      return;
+    }
+    const validation = validateContent(contentInput.value);
+    if (!validation.ok) {
+      postError.textContent = validation.reason;
+      return;
+    }
+    postButton.disabled = true;
+    try {
+      await callSupabase("messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Prefer: "return=representation" },
+        body: JSON.stringify({ content: validation.content }),
+      });
+      console.info("[board] 留言已送出");
+      contentInput.value = "";
+      updateCharCount();
+      await loadMessages();
+    } catch (postFailure) {
+      console.error("[board] 送出留言失敗：", postFailure);
+      postError.textContent = "送出失敗：" + postFailure.message;
+    } finally {
+      postButton.disabled = false;
+    }
+  }
+
+  /**
+   * 更新字數顯示。
+   * @returns {void}
+   */
+  function updateCharCount() {
+    charCount.textContent = contentInput.value.length + " / " + MAX_CONTENT_LENGTH;
+  }
+
+  /**
+   * 切換到留言畫面並載入留言。
+   * @returns {void}
+   */
+  function showBoard() {
+    lockView.classList.add("hidden");
+    boardView.classList.remove("hidden");
+    contentInput.focus();
+    loadMessages();
+  }
+
+  /**
+   * 切換到密碼畫面。
+   * @returns {void}
+   */
+  function showLock() {
+    boardView.classList.add("hidden");
+    lockView.classList.remove("hidden");
+    passwordInput.value = "";
+    lockError.textContent = "";
+    passwordInput.focus();
+  }
+
+  /**
+   * 處理密碼表單送出：密碼正確就記住並進入，錯誤就顯示提示。
+   * @param {SubmitEvent} submitEvent - 表單送出事件
+   * @returns {void}
+   */
+  function handleLockSubmit(submitEvent) {
+    submitEvent.preventDefault();
+    if (passwordInput.value === ACCESS_PASSWORD) {
+      writeStorage(UNLOCK_STORAGE_KEY, "1");
+      console.info("[auth] 密碼正確，已記住登入狀態");
+      showBoard();
+    } else {
+      console.info("[auth] 密碼錯誤");
+      lockError.textContent = "密碼錯誤。";
+      passwordInput.select();
+    }
+  }
+
+  /**
+   * 登出：清除記住的狀態並回到密碼畫面。
+   * @returns {void}
+   */
+  function handleLogout() {
+    writeStorage(UNLOCK_STORAGE_KEY, null);
+    console.info("[auth] 已登出");
+    showLock();
+  }
+
+  lockForm.addEventListener("submit", handleLockSubmit);
+  postForm.addEventListener("submit", handlePostSubmit);
+  contentInput.addEventListener("input", updateCharCount);
+  refreshButton.addEventListener("click", loadMessages);
+  logoutButton.addEventListener("click", handleLogout);
+
+  // 啟動：已記住密碼就直接進入留言畫面
+  if (readStorage(UNLOCK_STORAGE_KEY) === "1") {
+    showBoard();
+  } else {
+    showLock();
+  }
+</script>
+</body>
+</html>
