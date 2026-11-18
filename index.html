@@ -118,9 +118,9 @@
   "use strict";
 
   // ===== 設定區：填入 Supabase 專案資訊 =====
-  // anon public key 本來就是設計給前端使用的公開金鑰，權限由資料表的 RLS 控制。
-  const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
-  const SUPABASE_KEY = "YOUR-ANON-PUBLIC-KEY";
+  // publishable key 本來就是設計給前端使用的公開金鑰，權限由資料表的 GRANT 與 RLS 控制。
+  const SUPABASE_URL = "https://orkilengjzgricjndufu.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_sQUzFtPzyGfWK1-GUNOTRw_NQEGdbF7";
 
   // 進入密碼（寫在前端，只能擋一般路人）
   const ACCESS_PASSWORD = "a";
@@ -197,9 +197,9 @@
    * @throws {Error} 網路失敗或 HTTP 狀態非 2xx 時拋出，訊息含狀態碼與伺服器說明
    */
   async function callSupabase(pathAndQuery, requestOptions = {}) {
+    // publishable key 不是 JWT，只放在 apikey 標頭即可，不放 Authorization
     const requestHeaders = {
       apikey: SUPABASE_KEY,
-      Authorization: "Bearer " + SUPABASE_KEY,
       ...(requestOptions.headers || {}),
     };
     let response;
